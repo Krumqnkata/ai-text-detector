@@ -5,7 +5,7 @@
   features_lr_no_genre  — същото без „жанровите“ признаци (скоби, числа, кавички)
   features_rf           — Random Forest върху признаците
   tfidf_lr              — TF-IDF (символни n-грами) + Logistic Regression върху суровия текст (baseline)
-  features_bino_lr      — стиловите признаци + Binoculars (два езикови модела Qwen) — основен, ако е наличен
+  features_bino_lr      — стиловите признаци + Binoculars (два езикови модела Qwen) — в приложението при DETECTOR_LM=1
   binoculars_lr         — само трите Binoculars признака
 
 Binoculars изисква torch/transformers и моделите в models/hf; без тях (или с
@@ -253,7 +253,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--no-binoculars", action="store_true", help="без езиковите модели (по-бързо)")
     args = ap.parse_args()
-    neural = not args.no_binoculars and binoculars.available()
+    neural = not args.no_binoculars and binoculars.installed()
 
     REPORTS.mkdir(exist_ok=True)
     MODELS.mkdir(exist_ok=True)
@@ -277,13 +277,14 @@ def main():
     inputs = lambda kind, split, df: X[split][kind] if kind != "text" else df.text.tolist()  # noqa: E731
 
     models = build_models(neural)
-    main_model = "features_bino_lr" if neural else "features_lr"
+    main_model = "features_lr"  # Binoculars не подобри точността, затова е само по желание
+    neural_model = "features_bino_lr" if neural else None
     metrics = {"data": {"train": len(train), "test": len(test),
                         "unseen": 0 if unseen is None else len(unseen),
                         "genres": sorted(train.genre.unique().tolist()),
                         "train_models": sorted(train[train.label == 1].model.unique().tolist()),
                         "unseen_models": [] if unseen is None else sorted(unseen.model.unique().tolist())},
-               "main_model": main_model}
+               "main_model": main_model, "neural_model": neural_model}
     if neural:
         print("Zero-shot Binoculars…")
         metrics["zero_shot"] = zero_shot({k: X[k]["bino"][:, 2] for k in ("train", "test")}, frames)
@@ -319,7 +320,7 @@ def main():
     metrics["ablation"] = ablation(X["train"]["neural" if neural else "features"], names, groups, train, cv)
     print("Калибриране…")
     calibrators = {}
-    for name in dict.fromkeys(["features_lr", main_model]):
+    for name in dict.fromkeys([main_model, neural_model or main_model]):
         model, kind = models[name]
         calibrators[name], report = calibrate(model, {k: X[k][kind] for k in ("train", "test")}, train, test, cv)
         if name == main_model:
@@ -335,7 +336,7 @@ def main():
         stats[name] = {"human_mean": float(human.mean()), "ai_mean": float(ai.mean()),
                        "human_std": float(human.std())}
 
-    bundle = {"extractor": extractor, "models": models, "main_model": main_model, "binoculars": bino,
+    bundle = {"extractor": extractor, "models": models, "main_model": main_model, "neural_model": neural_model, "binoculars": bino,
               "feature_stats": stats, "metrics": metrics, "calibrators": calibrators}
     joblib.dump(bundle, MODELS / "detector.joblib", compress=3)
     (REPORTS / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -362,7 +363,9 @@ def write_report(detector, metrics, test, test_proba, stats):
                      f"{t['precision']:.3f} | {t['recall']:.3f} | {t['f1']:.3f} | "
                      f"{t.get('roc_auc', float('nan')):.3f} | {unseen} |")
     lines += ["", "Unseen recall = какъв дял от текстовете на невидян модел са разпознати като ИИ.  ",
-              f"Основен модел (в приложението): {MODEL_LABELS[metrics['main_model']]}.", ""]
+              f"Основен модел (в приложението): {MODEL_LABELS[metrics['main_model']]}"
+              + (f"; с DETECTOR_LM=1 — {MODEL_LABELS[metrics['neural_model']]}." if metrics.get("neural_model") else "."),
+              ""]
 
     if "zero_shot" in metrics:
         z = metrics["zero_shot"]

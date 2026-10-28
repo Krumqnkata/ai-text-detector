@@ -27,16 +27,23 @@ BINO_FEATURES = ["bino_log_ppl", "bino_x_ppl", "binoculars"]
 _LOCK = threading.RLock()
 
 
-def available():
-    """Може ли да се ползва: има torch/transformers и не е изключено с DETECTOR_NO_LM=1."""
-    if os.environ.get("DETECTOR_NO_LM") == "1":
-        return False
+def installed():
+    """Има ли torch и transformers (requirements-lm.txt)."""
     try:
         import torch  # noqa: F401
         import transformers  # noqa: F401
     except ImportError:
         return False
     return True
+
+
+def enabled():
+    """Да ползва ли приложението Binoculars: само при DETECTOR_LM=1 и инсталирани зависимости.
+
+    Изключено е по подразбиране: на нашите данни не подобри точността, а прави всеки
+    анализ ~15 пъти по-бавен и заема ~16 GB RAM (вж. README).
+    """
+    return os.environ.get("DETECTOR_LM") == "1" and installed()
 
 
 class Binoculars:

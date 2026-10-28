@@ -30,8 +30,10 @@ class Detector:
         # (a, b) по модел: P = σ(a·логит + b), Platt scaling.
         self.calibrators = bundle.get("calibrators") or {self.main: bundle.get("calibrator")}
         self.bino = bundle.get("binoculars")
-        if self.bino is None or not binoculars.available():
-            # Без езиковите модели падаме обратно на стиловия модел.
+        if self.bino is not None and binoculars.enabled() and bundle.get("neural_model"):
+            self.main = bundle["neural_model"]
+        else:
+            # Без езиковите модели (по подразбиране) работи само стиловият модел.
             self.bino = None
             self.models = {k: v for k, v in self.models.items() if v[1] != "neural"}
             if self.main not in self.models:

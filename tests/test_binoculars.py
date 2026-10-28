@@ -21,18 +21,32 @@ def test_cache_key_depends_on_text_and_models():
     assert a._key("текст") != b._key("текст")
 
 
-def test_available_respects_env(monkeypatch):
-    monkeypatch.setenv("DETECTOR_NO_LM", "1")
-    assert binoculars.available() is False
+def test_disabled_unless_opted_in(monkeypatch):
+    monkeypatch.delenv("DETECTOR_LM", raising=False)
+    assert binoculars.enabled() is False
+    monkeypatch.setenv("DETECTOR_LM", "1")
+    assert binoculars.enabled() is binoculars.installed()
 
 
 @pytest.mark.skipif(not MODEL_PATH.exists(), reason="няма обучен модел (scripts/train.py)")
-def test_detector_falls_back_without_lm(monkeypatch):
-    monkeypatch.setenv("DETECTOR_NO_LM", "1")
+def test_detector_uses_style_model_by_default(monkeypatch):
+    monkeypatch.delenv("DETECTOR_LM", raising=False)
     det = Detector.load()
-    assert not det.neural
+    assert not det.neural and det.main == "features_lr"
     assert all(kind != "neural" for _, kind in det.models.values())
     text = ("Това е обикновен текст за проверка. Той има няколко изречения с различна дължина. "
             "Някои са кратки. Други са малко по-дълги и съдържат повече думи, за да има какво да се мери.")
     out = det.predict(text)
     assert out["neural"] is False and 0 <= out["ai_probability"] <= 1
+
+
+@pytest.mark.skipif(not (MODEL_PATH.exists() and binoculars.installed()), reason="няма модел или torch")
+def test_detector_uses_binoculars_when_opted_in(monkeypatch):
+    from tests.test_api import TEXT  # резултатът му е в кеша, така че езиковите модели не се зареждат
+
+    monkeypatch.setenv("DETECTOR_LM", "1")
+    det = Detector.load()
+    assert det.neural and det.main == "features_bino_lr"
+    out = det.predict(TEXT)
+    assert out["neural"] is True
+    assert {f["name"] for f in out["features"]} >= {"binoculars", "bino_log_ppl", "bino_x_ppl"}

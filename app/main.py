@@ -2,7 +2,8 @@
 
     uvicorn app.main:app --reload
 
-С DETECTOR_NO_LM=1 приложението работи без езиковите модели (само стиловия модел).
+По подразбиране работи само стиловият модел. С DETECTOR_LM=1 се включва и Binoculars
+(езикови модели Qwen; ~16 GB RAM и 10–15 s на анализ).
 """
 import sys
 import threading
