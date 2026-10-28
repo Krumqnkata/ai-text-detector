@@ -1,8 +1,11 @@
 """FastAPI бекенд (Стъпка 6).
 
     uvicorn app.main:app --reload
+
+С DETECTOR_NO_LM=1 приложението работи без езиковите модели (само стиловия модел).
 """
 import sys
+import threading
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +24,9 @@ MAX_CHARS = 20_000
 app = FastAPI(title="Детектор на ИИ текст", version="0.1")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 detector = Detector.load() if MODEL_PATH.exists() else None
+if detector is not None and detector.neural:
+    # Езиковите модели се зареждат ~15 s — правим го на заден план, за да не чака първата заявка.
+    threading.Thread(target=detector.bino._load, daemon=True).start()
 
 
 class PredictRequest(BaseModel):

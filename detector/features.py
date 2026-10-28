@@ -92,6 +92,22 @@ FEATURES = {
 }
 FEATURE_NAMES = list(FEATURES)
 
+# Признаци от невронните езикови модели (detector/binoculars.py). Изчисляват се
+# отделно, защото са бавни, и се долепват след стиловите: ALL_FEATURE_NAMES.
+NEURAL_FEATURES = {
+    "bino_log_ppl": ("Невронна перплексити (Qwen, log)",
+                     "текстът изненадва езиковия модел",
+                     "текстът е лесно предсказуем за езиковия модел"),
+    "bino_x_ppl": ("Очаквана изненада (крос-перплексити)",
+                   "в тези позиции изборът на думи е широк",
+                   "в тези позиции изборът на думи е тесен"),
+    "binoculars": ("Binoculars (перплексити / крос-перплексити)",
+                   "текстът е по-непредсказуем, отколкото би бил текст на модел — типично за човек",
+                   "текстът е точно толкова предсказуем, колкото би го написал модел"),
+}
+ALL_FEATURES = {**FEATURES, **NEURAL_FEATURES}
+ALL_FEATURE_NAMES = list(ALL_FEATURES)
+
 # Групи за аблационния анализ. „Жанр“ са признаците, които отразяват по-скоро
 # конвенциите на Уикипедия (произношение в скоби, години, цитирани заглавия),
 # отколкото разликата човек/ИИ.
@@ -118,7 +134,7 @@ class ColumnSelector(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        return np.asarray(X)[:, [FEATURE_NAMES.index(n) for n in self.keep]]
+        return np.asarray(X)[:, [ALL_FEATURE_NAMES.index(n) for n in self.keep]]
 
 
 def _per100(count, n_words):

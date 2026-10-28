@@ -36,11 +36,11 @@ def test_predict_shape(client):
 def test_contributions_explain_the_logit(client):
     """Сумата от приносите + свободния член трябва да дава точно логита на модела."""
     det = main.detector
-    feats = det.extractor.transform([TEXT])
-    contrib, _ = det.contributions(feats[0])
+    vec = det.vectors([TEXT])[det.models[det.main][1]]
+    contrib, _ = det.contributions(vec[0])
     pipe = det.models[det.main][0]
     assert contrib.sum() + pipe.named_steps["clf"].intercept_[0] == pytest.approx(
-        pipe.decision_function(feats)[0])
+        pipe.decision_function(vec)[0])
 
 
 def test_short_text_warning(client):

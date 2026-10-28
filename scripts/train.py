@@ -5,6 +5,11 @@
   features_lr_no_genre  — същото без „жанровите“ признаци (скоби, числа, кавички)
   features_rf           — Random Forest върху признаците
   tfidf_lr              — TF-IDF (символни n-грами) + Logistic Regression върху суровия текст (baseline)
+  features_bino_lr      — стиловите признаци + Binoculars (два езикови модела Qwen) — основен, ако е наличен
+  binoculars_lr         — само трите Binoculars признака
+
+Binoculars изисква torch/transformers и моделите в models/hf; без тях (или с
+--no-binoculars) се обучават само първите четири модела.
 
 Освен метриките прави оценка по жанрове и между жанрове (обучение на единия,
 тест на другия), аблация по групи признаци, калибриране на вероятностите
@@ -12,7 +17,9 @@
 в reports/report.md, reports/metrics.json и reports/learning_curve.svg.
 
     python scripts/train.py
+    python scripts/train.py --no-binoculars
 """
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -35,8 +42,10 @@ from sklearn.preprocessing import StandardScaler
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from detector.features import (FEATURE_GROUPS, FEATURE_NAMES, FEATURES, GENRE_FEATURES,  # noqa: E402
-                               ColumnSelector, FeatureExtractor)
+from detector import binoculars  # noqa: E402
+from detector.binoculars import BINO_FEATURES, Binoculars  # noqa: E402
+from detector.features import (ALL_FEATURE_NAMES, ALL_FEATURES, FEATURE_GROUPS,  # noqa: E402
+                               FEATURE_NAMES, GENRE_FEATURES, ColumnSelector, FeatureExtractor)
 from detector.model import Detector  # noqa: E402
 from detector.ngram_lm import CharNgramLM  # noqa: E402
 
@@ -46,6 +55,8 @@ MODEL_LABELS = {
     "features_lr_no_genre": "Признаци без жанр + LR",
     "features_rf": "Признаци + RF",
     "tfidf_lr": "TF-IDF + LR",
+    "features_bino_lr": "Признаци + Binoculars + LR",
+    "binoculars_lr": "Само Binoculars + LR",
 }
 
 
@@ -55,8 +66,8 @@ def feature_lr(keep=None):
                              ("clf", LogisticRegression(C=0.5, max_iter=2000))])
 
 
-def build_models(seed=42):
-    return {
+def build_models(neural, seed=42):
+    models = {
         "features_lr": (feature_lr(), "features"),
         "features_lr_no_genre": (feature_lr([n for n in FEATURE_NAMES if n not in GENRE_FEATURES]),
                                  "features"),
@@ -66,6 +77,10 @@ def build_models(seed=42):
                                                          sublinear_tf=True, min_df=2)),
                                ("clf", LogisticRegression(C=4.0, max_iter=2000))]), "text"),
     }
+    if neural:
+        models["features_bino_lr"] = (feature_lr(), "neural")
+        models["binoculars_lr"] = (feature_lr(BINO_FEATURES), "neural")
+    return models
 
 
 def scores(y, proba):
@@ -83,20 +98,22 @@ def scores(y, proba):
 
 
 def cross_genre(models, X_all, df_all):
+    names = [n for n in ("features_lr", "features_lr_no_genre", "tfidf_lr", "features_bino_lr", "binoculars_lr")
+             if n in models]
     """Обучение само върху жанр A, тест върху целия жанр B — пренася ли се наученото?"""
     out = {}
     for src, dst in permutations(sorted(df_all.genre.unique()), 2):
         a, b = (df_all.genre == src).values, (df_all.genre == dst).values
-        for name in ("features_lr", "features_lr_no_genre", "tfidf_lr"):
+        for name in names:
             model, kind = models[name]
-            data = X_all if kind == "features" else np.array(df_all.text.tolist(), dtype=object)
+            data = X_all[kind] if kind != "text" else np.array(df_all.text.tolist(), dtype=object)
             fitted = clone(model).fit(data[a], df_all.label.values[a])
             res = scores(df_all.label.values[b], fitted.predict_proba(data[b])[:, 1])
             out.setdefault(f"{src} → {dst}", {})[name] = res
     return out
 
 
-def ablation(X, train, cv):
+def ablation(X, names, groups, train, cv):
     """CV на LR без всяка група признаци и само с нея."""
     def cv_scores(keep):
         res = cross_validate(feature_lr(keep), X, train.label, groups=train.topic, cv=cv,
@@ -104,9 +121,33 @@ def ablation(X, train, cv):
         return {"f1": float(res["test_f1"].mean()), "roc_auc": float(res["test_roc_auc"].mean())}
 
     out = {"Всички признаци": {"without": cv_scores(None), "only": None}}
-    for group, names in FEATURE_GROUPS.items():
-        out[group] = {"without": cv_scores([n for n in FEATURE_NAMES if n not in names]),
-                      "only": cv_scores(names)}
+    for group, members in groups.items():
+        out[group] = {"without": cv_scores([n for n in names if n not in members]),
+                      "only": cv_scores(members)}
+    return out
+
+
+def zero_shot(scores_by_split, frames):
+    """Binoculars без никакво обучение: по-нисък резултат → по-вероятно ИИ.
+
+    ROC AUC не зависи от праг. За accuracy прагът се избира само върху train
+    (най-добрата accuracy там) и се прилага върху test.
+    """
+    tr, te = scores_by_split["train"], scores_by_split["test"]
+    y_tr, y_te = frames["train"].label.values, frames["test"].label.values
+    candidates = np.unique(tr)
+    best = max(candidates, key=lambda t: accuracy_score(y_tr, (tr <= t).astype(int)))
+    out = {"threshold": float(best),
+           "train_auc": float(roc_auc_score(y_tr, -tr)), "test_auc": float(roc_auc_score(y_te, -te)),
+           "test_accuracy": float(accuracy_score(y_te, (te <= best).astype(int))),
+           "means": {}}
+    both = pd.concat([frames["train"], frames["test"]], ignore_index=True)
+    vals = np.concatenate([tr, te])
+    for g in sorted(both.genre.unique()):
+        m = (both.genre == g).values
+        out["means"][g] = {"human": float(vals[m & (both.label.values == 0)].mean()),
+                           "ai": float(vals[m & (both.label.values == 1)].mean()),
+                           "auc": float(roc_auc_score(both.label.values[m], -vals[m]))}
     return out
 
 
@@ -138,11 +179,11 @@ def calibrate(model, X, train, test, cv):
     return (a, b), report
 
 
-def curve(models, X, train, cv):
+def curve(models, names, X, train, cv):
     out = {}
-    for name in ("features_lr", "features_rf", "tfidf_lr"):
+    for name in names:
         model, kind = models[name]
-        data = X["train"] if kind == "features" else np.array(train.text.tolist(), dtype=object)
+        data = X["train"][kind] if kind != "text" else np.array(train.text.tolist(), dtype=object)
         sizes, _, test_scores = learning_curve(model, data, train.label, groups=train.topic, cv=cv,
                                                train_sizes=np.linspace(0.25, 1.0, 5), scoring="f1",
                                                shuffle=True, random_state=42)
@@ -155,8 +196,8 @@ def write_learning_curve_svg(lc, path):
     """Линейна графика на F1 спрямо броя обучаващи текстове (без външни библиотеки)."""
     W, H = 680, 340
     L, R, T, B = 52, 190, 52, 46
-    series = [("features_lr", "--s1"), ("features_rf", "--s2"), ("tfidf_lr", "--s3")]
-    sizes = lc["features_lr"]["sizes"]
+    series = list(zip(lc, ["--s1", "--s2", "--s3"]))
+    sizes = lc[series[0][0]]["sizes"]
     lowest = min(v for name, _ in series for v in lc[name]["f1"])
     x0, x1, y0, y1 = min(sizes), max(sizes), min(0.5, np.floor(lowest * 10) / 10), 1.0
     ticks = np.round(np.arange(y0, y1 + 0.001, 0.1), 1)
@@ -209,6 +250,11 @@ def write_learning_curve_svg(lc, path):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--no-binoculars", action="store_true", help="без езиковите модели (по-бързо)")
+    args = ap.parse_args()
+    neural = not args.no_binoculars and binoculars.available()
+
     REPORTS.mkdir(exist_ok=True)
     MODELS.mkdir(exist_ok=True)
     train, test = pd.read_csv(DATA / "train.csv"), pd.read_csv(DATA / "test.csv")
@@ -220,17 +266,27 @@ def main():
     extractor = FeatureExtractor(CharNgramLM(order=4).fit(reference))
 
     print("Извличане на признаци…")
-    X = {"train": extractor.transform(train.text), "test": extractor.transform(test.text)}
-    if unseen is not None:
-        X["unseen"] = extractor.transform(unseen.text)
-    inputs = lambda kind, split, df: X[split] if kind == "features" else df.text.tolist()  # noqa: E731
+    frames = {"train": train, "test": test, **({"unseen": unseen} if unseen is not None else {})}
+    X = {split: {"features": extractor.transform(df.text)} for split, df in frames.items()}
+    bino = Binoculars() if neural else None
+    if neural:
+        print("Binoculars (езикови модели; кешира се в data/cache)…")
+        for split, df in frames.items():
+            X[split]["bino"] = bino.transform(df.text, verbose=True)
+            X[split]["neural"] = np.hstack([X[split]["features"], X[split]["bino"]])
+    inputs = lambda kind, split, df: X[split][kind] if kind != "text" else df.text.tolist()  # noqa: E731
 
-    models = build_models()
+    models = build_models(neural)
+    main_model = "features_bino_lr" if neural else "features_lr"
     metrics = {"data": {"train": len(train), "test": len(test),
                         "unseen": 0 if unseen is None else len(unseen),
                         "genres": sorted(train.genre.unique().tolist()),
                         "train_models": sorted(train[train.label == 1].model.unique().tolist()),
-                        "unseen_models": [] if unseen is None else sorted(unseen.model.unique().tolist())}}
+                        "unseen_models": [] if unseen is None else sorted(unseen.model.unique().tolist())},
+               "main_model": main_model}
+    if neural:
+        print("Zero-shot Binoculars…")
+        metrics["zero_shot"] = zero_shot({k: X[k]["bino"][:, 2] for k in ("train", "test")}, frames)
     test_proba = {}
     n_splits = min(5, train.topic.nunique())
     cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
@@ -248,31 +304,39 @@ def main():
             p = model.predict_proba(inputs(kind, "unseen", unseen))[:, 1]
             m["unseen"] = scores(unseen.label.values, p)
         metrics[name] = m
-        print(f"  {name:21s} CV F1={m['cv']['f1']:.3f}  test F1={m['test']['f1']:.3f}  "
+        print(f"  {name:22s} CV F1={m['cv']['f1']:.3f}  test F1={m['test']['f1']:.3f}  "
               f"test acc={m['test']['accuracy']:.3f}")
 
     if train.genre.nunique() > 1:
         print("Оценка между жанрове…")
         both = pd.concat([train, test], ignore_index=True)
-        metrics["cross_genre"] = cross_genre(models, np.vstack([X["train"], X["test"]]), both)
+        X_all = {k: np.vstack([X["train"][k], X["test"][k]]) for k in X["train"]}
+        metrics["cross_genre"] = cross_genre(models, X_all, both)
 
     print("Аблация по групи признаци…")
-    metrics["ablation"] = ablation(X["train"], train, cv)
+    names = ALL_FEATURE_NAMES if neural else FEATURE_NAMES
+    groups = {**FEATURE_GROUPS, **({"Невронна (Binoculars)": BINO_FEATURES} if neural else {})}
+    metrics["ablation"] = ablation(X["train"]["neural" if neural else "features"], names, groups, train, cv)
     print("Калибриране…")
-    calibrator, metrics["calibration"] = calibrate(models["features_lr"][0], X, train, test, cv)
+    calibrators = {}
+    for name in dict.fromkeys(["features_lr", main_model]):
+        model, kind = models[name]
+        calibrators[name], report = calibrate(model, {k: X[k][kind] for k in ("train", "test")}, train, test, cv)
+        if name == main_model:
+            metrics["calibration"] = report
     print("Крива на ученето…")
-    metrics["learning_curve"] = curve(models, X, train, cv)
+    metrics["learning_curve"] = curve(models, [main_model, "features_rf", "tfidf_lr"], X, train, cv)
     write_learning_curve_svg(metrics["learning_curve"], REPORTS / "learning_curve.svg")
 
     stats = {}
-    for i, name in enumerate(FEATURE_NAMES):
-        col = X["train"][:, i]
+    for i, name in enumerate(names):
+        col = X["train"]["neural" if neural else "features"][:, i]
         human, ai = col[train.label.values == 0], col[train.label.values == 1]
         stats[name] = {"human_mean": float(human.mean()), "ai_mean": float(ai.mean()),
                        "human_std": float(human.std())}
 
-    bundle = {"extractor": extractor, "models": models, "main_model": "features_lr",
-              "feature_stats": stats, "metrics": metrics, "calibrator": calibrator}
+    bundle = {"extractor": extractor, "models": models, "main_model": main_model, "binoculars": bino,
+              "feature_stats": stats, "metrics": metrics, "calibrators": calibrators}
     joblib.dump(bundle, MODELS / "detector.joblib", compress=3)
     (REPORTS / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     write_report(Detector(bundle), metrics, test, test_proba, stats)
@@ -290,17 +354,31 @@ def write_report(detector, metrics, test, test_proba, stats):
     lines += ["## Сравнение на моделите", "",
               "| Модел | CV F1 | Test accuracy | Precision | Recall | F1 | ROC AUC | Unseen recall |",
               "|---|---|---|---|---|---|---|---|"]
-    for name in MODEL_LABELS:
+    shown = [n for n in MODEL_LABELS if n in metrics]
+    for name in shown:
         m, t = metrics[name], metrics[name]["test"]
         unseen = f"{m['unseen']['recall']:.3f}" if "unseen" in m else "—"
         lines.append(f"| {MODEL_LABELS[name]} | {m['cv']['f1']:.3f} | {t['accuracy']:.3f} | "
                      f"{t['precision']:.3f} | {t['recall']:.3f} | {t['f1']:.3f} | "
                      f"{t.get('roc_auc', float('nan')):.3f} | {unseen} |")
-    lines += ["", "Unseen recall = какъв дял от текстовете на невидян модел са разпознати като ИИ.", ""]
+    lines += ["", "Unseen recall = какъв дял от текстовете на невидян модел са разпознати като ИИ.  ",
+              f"Основен модел (в приложението): {MODEL_LABELS[metrics['main_model']]}.", ""]
+
+    if "zero_shot" in metrics:
+        z = metrics["zero_shot"]
+        lines += ["## Zero-shot Binoculars (без обучение)", "",
+                  "Само съотношението перплексити / крос-перплексити на Qwen2.5-1.5B (base) и "
+                  "Qwen2.5-1.5B-Instruct, без никакво обучение. По-нисък резултат → по-вероятно ИИ.", "",
+                  f"ROC AUC: train {z['train_auc']:.3f}, test {z['test_auc']:.3f}. "
+                  f"С праг {z['threshold']:.3f}, избран върху train, test accuracy е {z['test_accuracy']:.3f}.", "",
+                  "| Жанр | Средно човек | Средно ИИ | ROC AUC |", "|---|---|---|---|"]
+        for g, r in z["means"].items():
+            lines.append(f"| {g} | {r['human']:.3f} | {r['ai']:.3f} | {r['auc']:.3f} |")
+        lines.append("")
 
     lines += ["## По жанрове (test)", "", "| Модел | Жанр | Текстове | Accuracy | F1 | ROC AUC |",
               "|---|---|---|---|---|---|"]
-    for name in MODEL_LABELS:
+    for name in shown:
         for g, t in metrics[name]["test_by_genre"].items():
             n = sum(sum(row) for row in t["confusion_matrix"])
             lines.append(f"| {MODEL_LABELS[name]} | {g} | {n} | {t['accuracy']:.3f} | {t['f1']:.3f} | "
@@ -331,7 +409,7 @@ def write_report(detector, metrics, test, test_proba, stats):
     lines.append("")
 
     c = metrics["calibration"]
-    lines += ["## Калибриране на вероятностите (features_lr, test)", "",
+    lines += [f"## Калибриране на вероятностите ({metrics['main_model']}, test)", "",
               f"Platt scaling върху out-of-fold логитите: P = σ({c['a']:.3f} · логит {c['b']:+.3f}). "
               "По-нисък Brier/ECE = вероятностите по-добре отговарят на реалната честота на грешките.", "",
               "| | Brier | ECE | Средна увереност | Accuracy |", "|---|---|---|---|---|"]
@@ -357,20 +435,23 @@ def write_report(detector, metrics, test, test_proba, stats):
         lines += [f"**{MODEL_LABELS[name]}**", "", "| | предсказан човек | предсказан ИИ |", "|---|---|---|",
                   f"| истински човек | {tn} | {fp} |", f"| истински ИИ | {fn} | {tp} |", ""]
 
-    clf = detector.models["features_lr"][0].named_steps["clf"]
+    main = metrics["main_model"]
+    clf = detector.models[main][0].named_steps["clf"]
+    names = detector.feature_names(main)
     rf = detector.models["features_rf"][0]
     order = np.argsort(-np.abs(clf.coef_[0]))
-    lines += ["## Тежести на признаците", "",
+    lines += [f"## Тежести на признаците ({MODEL_LABELS[main]})", "",
               "Положителна тежест → натежава към ИИ, отрицателна → към човек "
               "(признаците са стандартизирани, така че тежестите са сравними).", "",
               "| Признак | Тежест (LR) | Важност (RF) | Средно човек | Средно ИИ |", "|---|---|---|---|---|"]
     for i in order:
-        name = FEATURE_NAMES[i]
-        lines.append(f"| {FEATURES[name][0]} | {clf.coef_[0][i]:+.3f} | {rf.feature_importances_[i]:.3f} | "
+        name = names[i]
+        rf_imp = f"{rf.feature_importances_[i]:.3f}" if i < len(rf.feature_importances_) else "—"
+        lines.append(f"| {ALL_FEATURES[name][0]} | {clf.coef_[0][i]:+.3f} | {rf_imp} | "
                      f"{stats[name]['human_mean']:.3f} | {stats[name]['ai_mean']:.3f} |")
 
-    lines += ["", "## Анализ на грешките (features_lr, test)", ""]
-    proba = test_proba["features_lr"]
+    lines += ["", f"## Анализ на грешките ({MODEL_LABELS[main]}, test)", ""]
+    proba = test_proba[main]
     wrong_mask = (proba >= 0.5).astype(int) != test.label.values
     wrong = test[wrong_mask].assign(p=proba[wrong_mask])
     if wrong.empty:

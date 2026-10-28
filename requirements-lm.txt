@@ -1,0 +1,7 @@
+# По желание: Binoculars с езиковите модели Qwen2.5-1.5B (~6 GB, сваля се при първото ползване).
+# PyTorch за процесор:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.4
+transformers>=4.45
+huggingface_hub>=0.25
+safetensors>=0.4

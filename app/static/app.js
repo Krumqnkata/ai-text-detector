@@ -3,6 +3,8 @@ const MODELS = {
   features_lr: ["Признаци + Logistic Regression", "19 стилови признака, линеен модел"],
   features_lr_no_genre: ["Признаци без жанр + LR", "без скоби, числа и кавички"],
   features_rf: ["Признаци + Random Forest", "същите признаци, нелинеен модел"],
+  features_bino_lr: ["Признаци + Binoculars", "19 стилови признака + невронна предсказуемост (Qwen2.5)"],
+  binoculars_lr: ["Само Binoculars", "два езикови модела, без стиловите признаци"],
   tfidf_lr: ["TF-IDF + Logistic Regression", "символни n-грами от суровия текст (baseline)"],
 };
 const MIN_WORDS = 80;
@@ -125,7 +127,7 @@ function render(d) {
   chip.className = `verdict-chip ${short ? "" : p >= 0.6 ? "ai" : p <= 0.4 ? "human" : ""}`;
   chip.textContent = short ? "ненадеждно" : p >= 0.6 ? "по-скоро ИИ" : p <= 0.4 ? "по-скоро човек" : "неясно";
   $("verdict").textContent = d.verdict;
-  $("summary-meta").textContent = `${d.word_count} думи · ${d.calibrated ? "калибрирана вероятност" : "некалибрирана вероятност"} · основен модел: признаци + LR`;
+  $("summary-meta").textContent = `${d.word_count} думи · ${d.calibrated ? "калибрирана вероятност" : "некалибрирана вероятност"} · основен модел: ${(MODELS[d.model] || [d.model])[0]}`;
   $("warnings").innerHTML = d.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join("");
 
   renderReasons(d);
