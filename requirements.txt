@@ -1,0 +1,11 @@
+scikit-learn>=1.5
+pandas>=2.2
+numpy>=1.26
+joblib>=1.4
+fastapi>=0.115
+uvicorn[standard]>=0.30
+anthropic>=0.70
+
+# за разработка
+pytest>=8
+httpx>=0.27
