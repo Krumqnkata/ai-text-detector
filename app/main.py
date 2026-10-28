@@ -40,14 +40,16 @@ def health():
 
 @app.get("/examples")
 def examples():
-    """По един човешки и един ИИ текст от test — моделът не ги е виждал при обучението."""
+    """По един човешки и един ИИ текст от всеки жанр в test — моделът не ги е виждал."""
     path = ROOT / "data" / "test.csv"
     if not path.exists():
         return []
     test = pd.read_csv(path)
-    return [{"label": label, "topic": row.topic, "text": row.text}
+    genre = test["genre"] if "genre" in test else pd.Series("encyclopedia", index=test.index)
+    return [{"label": label, "genre": g, "topic": row.topic, "text": row.text}
+            for g in sorted(genre.unique())
             for label, cls in (("human", 0), ("ai", 1))
-            for row in test[test.label == cls].head(1).itertuples()]
+            for row in test[(test.label == cls) & (genre == g)].head(1).itertuples()]
 
 
 @app.post("/predict")

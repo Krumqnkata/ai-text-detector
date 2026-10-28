@@ -6,7 +6,8 @@
   features_rf           — Random Forest върху признаците
   tfidf_lr              — TF-IDF (символни n-грами) + Logistic Regression върху суровия текст (baseline)
 
-Освен метриките прави аблация по групи признаци, калибриране на вероятностите
+Освен метриките прави оценка по жанрове и между жанрове (обучение на единия,
+тест на другия), аблация по групи признаци, калибриране на вероятностите
 (Platt scaling върху out-of-fold логитите) и крива на ученето. Резултатите отиват
 в reports/report.md, reports/metrics.json и reports/learning_curve.svg.
 
@@ -16,9 +17,12 @@ import json
 import sys
 from pathlib import Path
 
+from itertools import permutations
+
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -75,6 +79,20 @@ def scores(y, proba):
     }
     if len(set(y)) == 2:
         out["roc_auc"] = roc_auc_score(y, proba)
+    return out
+
+
+def cross_genre(models, X_all, df_all):
+    """Обучение само върху жанр A, тест върху целия жанр B — пренася ли се наученото?"""
+    out = {}
+    for src, dst in permutations(sorted(df_all.genre.unique()), 2):
+        a, b = (df_all.genre == src).values, (df_all.genre == dst).values
+        for name in ("features_lr", "features_lr_no_genre", "tfidf_lr"):
+            model, kind = models[name]
+            data = X_all if kind == "features" else np.array(df_all.text.tolist(), dtype=object)
+            fitted = clone(model).fit(data[a], df_all.label.values[a])
+            res = scores(df_all.label.values[b], fitted.predict_proba(data[b])[:, 1])
+            out.setdefault(f"{src} → {dst}", {})[name] = res
     return out
 
 
@@ -210,6 +228,7 @@ def main():
     models = build_models()
     metrics = {"data": {"train": len(train), "test": len(test),
                         "unseen": 0 if unseen is None else len(unseen),
+                        "genres": sorted(train.genre.unique().tolist()),
                         "train_models": sorted(train[train.label == 1].model.unique().tolist()),
                         "unseen_models": [] if unseen is None else sorted(unseen.model.unique().tolist())}}
     test_proba = {}
@@ -221,13 +240,21 @@ def main():
         model.fit(inputs(kind, "train", train), train.label)
         test_proba[name] = model.predict_proba(inputs(kind, "test", test))[:, 1]
         m = {"cv": {k[5:]: float(np.mean(v)) for k, v in cv_res.items() if k.startswith("test_")},
-             "test": scores(test.label.values, test_proba[name])}
+             "test": scores(test.label.values, test_proba[name]),
+             "test_by_genre": {g: scores(test.label.values[mask], test_proba[name][mask])
+                               for g in sorted(test.genre.unique())
+                               for mask in [(test.genre == g).values]}}
         if unseen is not None:
             p = model.predict_proba(inputs(kind, "unseen", unseen))[:, 1]
             m["unseen"] = scores(unseen.label.values, p)
         metrics[name] = m
         print(f"  {name:21s} CV F1={m['cv']['f1']:.3f}  test F1={m['test']['f1']:.3f}  "
               f"test acc={m['test']['accuracy']:.3f}")
+
+    if train.genre.nunique() > 1:
+        print("Оценка между жанрове…")
+        both = pd.concat([train, test], ignore_index=True)
+        metrics["cross_genre"] = cross_genre(models, np.vstack([X["train"], X["test"]]), both)
 
     print("Аблация по групи признаци…")
     metrics["ablation"] = ablation(X["train"], train, cv)
@@ -256,6 +283,7 @@ def write_report(detector, metrics, test, test_proba, stats):
     lines = ["# Отчет от обучението", ""]
     d = metrics["data"]
     lines += [f"Train: {d['train']} текста, test: {d['test']}, unseen: {d['unseen']}.  ",
+              f"Жанрове: {', '.join(d['genres'])}.  ",
               f"ИИ модели в обучението: {', '.join(d['train_models'])}.  ",
               f"Невиждани модели: {', '.join(d['unseen_models']) or '—'}.", ""]
 
@@ -269,6 +297,26 @@ def write_report(detector, metrics, test, test_proba, stats):
                      f"{t['precision']:.3f} | {t['recall']:.3f} | {t['f1']:.3f} | "
                      f"{t.get('roc_auc', float('nan')):.3f} | {unseen} |")
     lines += ["", "Unseen recall = какъв дял от текстовете на невидян модел са разпознати като ИИ.", ""]
+
+    lines += ["## По жанрове (test)", "", "| Модел | Жанр | Текстове | Accuracy | F1 | ROC AUC |",
+              "|---|---|---|---|---|---|"]
+    for name in MODEL_LABELS:
+        for g, t in metrics[name]["test_by_genre"].items():
+            n = sum(sum(row) for row in t["confusion_matrix"])
+            lines.append(f"| {MODEL_LABELS[name]} | {g} | {n} | {t['accuracy']:.3f} | {t['f1']:.3f} | "
+                         f"{t.get('roc_auc', float('nan')):.3f} |")
+    lines.append("")
+
+    if "cross_genre" in metrics:
+        lines += ["## Между жанрове", "",
+                  "Обучение само върху единия жанр (train + test), тест върху целия друг жанр. "
+                  "Показва дали моделът е научил стил на ИИ, или особеностите на един жанр.", "",
+                  "| Посока | Модел | Accuracy | Precision | Recall | F1 | ROC AUC |", "|---|---|---|---|---|---|---|"]
+        for direction, res in metrics["cross_genre"].items():
+            for name, t in res.items():
+                lines.append(f"| {direction} | {MODEL_LABELS[name]} | {t['accuracy']:.3f} | {t['precision']:.3f} | "
+                             f"{t['recall']:.3f} | {t['f1']:.3f} | {t.get('roc_auc', float('nan')):.3f} |")
+        lines.append("")
 
     lines += ["## Аблация по групи признаци", "",
               "Logistic Regression, 5-кратна крос-валидация по теми върху train. "
@@ -330,7 +378,7 @@ def write_report(detector, metrics, test, test_proba, stats):
     for row in wrong.itertuples():
         truth = "ИИ" if row.label else "човек"
         result = detector.predict(row.text, top_k=3)
-        lines += [f"### {row.topic} — истински: {truth} ({row.model}), P(ИИ) = {row.p:.2f}", "",
+        lines += [f"### {row.topic} — {row.genre}, истински: {truth} ({row.model}), P(ИИ) = {row.p:.2f}", "",
                   "> " + row.text[:400].replace("\n", " ") + ("…" if len(row.text) > 400 else ""), "",
                   "Най-силни признаци:", ""]
         lines += [f"- {'→ ИИ' if f['toward'] == 'ai' else '→ човек'}: {f['label']} — {f['text']}"

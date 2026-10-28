@@ -4,6 +4,8 @@
   за да са със сходна дължина с ИИ текстовете.
 - Разделянето е по тема: една тема е или само в train, или само в test,
   иначе TF-IDF моделът би „запомнил“ темата вместо стила.
+- Балансът и разделянето се правят поотделно за всеки жанр (колона `genre`;
+  файловете без нея се броят за "encyclopedia"), за да не стане жанрът подсказка.
 - --holdout-model изважда текстовете на даден модел в test_unseen.csv —
   те не участват в обучението и показват устойчивостта към нов модел.
 
@@ -33,11 +35,36 @@ def truncate(text, max_words):
     return " ".join(out)
 
 
+def split_genre(df, test_size, rng):
+    """Балансира класовете в един жанр и го разделя на train/test по теми."""
+    # Махаме излишъка от по-големия клас, като първо пазим темите,
+    # които имат и двата класа (най-добре съпоставими двойки).
+    counts = df["label"].value_counts()
+    major = counts.idxmax()
+    paired_topics = set(df[df.label == 0]["topic"]) & set(df[df.label == 1]["topic"])
+    major_rows = df[df.label == major]
+    priority = major_rows["topic"].isin(paired_topics).astype(int) + rng.random(len(major_rows))
+    keep = major_rows.loc[priority.sort_values(ascending=False).index[:counts.min()]]
+    df = pd.concat([df[df.label != major], keep])
+
+    topics = np.array(df["topic"].unique(), dtype=object)
+    rng.shuffle(topics)
+    target = test_size * len(df)
+    test_topics, n = set(), 0
+    for topic in topics:
+        if n >= target:
+            break
+        test_topics.add(topic)
+        n += (df["topic"] == topic).sum()
+    return df[~df["topic"].isin(test_topics)], df[df["topic"].isin(test_topics)]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--human", nargs="+", type=Path, default=[ROOT / "data" / "human.csv"])
+    ap.add_argument("--human", nargs="+", type=Path,
+                    default=sorted((ROOT / "data").glob("human*.csv")))
     ap.add_argument("--ai", nargs="+", type=Path,
-                    default=[p for p in (ROOT / "data").glob("ai_*.csv")])
+                    default=sorted((ROOT / "data").glob("ai_*.csv")))
     ap.add_argument("--holdout-model", nargs="*", default=[])
     ap.add_argument("--max-words", type=int, default=130,
                     help="горна граница на дължината (близо до дължината на ИИ текстовете)")
@@ -52,38 +79,20 @@ def main():
     human["text"] = human["text"].map(lambda t: truncate(t, args.max_words))
     ai["text"] = ai["text"].map(lambda t: truncate(t, args.max_words))
     df = pd.concat([human, ai], ignore_index=True)
+    df["genre"] = df["genre"].fillna("encyclopedia") if "genre" in df else "encyclopedia"
     df = df[df["text"].map(lambda t: len(words(t))) >= args.min_words].reset_index(drop=True)
 
     unseen = df[df["model"].isin(args.holdout_model)]
     df = df[~df["model"].isin(args.holdout_model)]
 
-    # Балансиране: махаме излишъка от по-големия клас, като първо пазим темите,
-    # които имат и двата класа (най-добре съпоставими двойки).
     rng = np.random.default_rng(args.seed)
-    counts = df["label"].value_counts()
-    if counts.min() == 0:
-        sys.exit("Липсва един от класовете — провери входните файлове.")
-    major = counts.idxmax()
-    paired_topics = set(df[df.label == 0]["topic"]) & set(df[df.label == 1]["topic"])
-    major_rows = df[df.label == major]
-    priority = major_rows["topic"].isin(paired_topics).astype(int) + rng.random(len(major_rows))
-    keep = major_rows.loc[priority.sort_values(ascending=False).index[:counts.min()]]
-    df = pd.concat([df[df.label != major], keep]).sample(frac=1, random_state=args.seed)
+    if df.groupby("genre")["label"].nunique().min() < 2:
+        sys.exit("Някой жанр няма и двата класа — провери входните файлове.")
+    parts = [split_genre(g, args.test_size, rng) for _, g in df.groupby("genre")]
+    train = pd.concat([tr for tr, _ in parts]).sample(frac=1, random_state=args.seed)
+    test = pd.concat([te for _, te in parts]).sample(frac=1, random_state=args.seed)
 
-    # Разделяне по теми, като се пази баланс на класовете.
-    topics = np.array(df["topic"].unique(), dtype=object)
-    rng.shuffle(topics)
-    target = args.test_size * len(df)
-    test_topics, n = set(), 0
-    for topic in topics:
-        if n >= target:
-            break
-        test_topics.add(topic)
-        n += (df["topic"] == topic).sum()
-    test = df[df["topic"].isin(test_topics)]
-    train = df[~df["topic"].isin(test_topics)]
-
-    cols = ["text", "label", "topic", "source", "model"]
+    cols = ["text", "label", "topic", "source", "model", "genre"]
     out = ROOT / "data"
     train[cols].to_csv(out / "train.csv", index=False)
     test[cols].to_csv(out / "test.csv", index=False)
@@ -94,7 +103,8 @@ def main():
 
     for name, part in [("train", train), ("test", test), ("test_unseen", unseen)]:
         if len(part):
-            print(f"{name:12s} {len(part):4d} текста  (човек: {(part.label == 0).sum()}, ИИ: {(part.label == 1).sum()})")
+            print(f"{name:12s} {len(part):4d} текста  (човек: {(part.label == 0).sum()}, ИИ: {(part.label == 1).sum()})  "
+                  + ", ".join(f"{g}: {n}" for g, n in part["genre"].value_counts().items()))
 
 
 if __name__ == "__main__":

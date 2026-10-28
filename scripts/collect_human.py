@@ -26,9 +26,9 @@ BATCH = 20   # максимумът на TextExtracts за exintro заявки
 DELAY = 2.0  # секунди между заявките
 
 
-def api_get(user_agent, retries=5, **params):
+def api_get(user_agent, retries=5, api=API, **params):
     params = {"format": "json", "formatversion": "2", "maxlag": "5", **params}
-    url = API + "?" + urllib.parse.urlencode(params)
+    url = api + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
     for attempt in range(retries):
         try:
@@ -49,9 +49,9 @@ def clean(text):
     return "\n".join(p for p in paras if len(p.split()) >= 8)
 
 
-def extracts(user_agent, **params):
+def extracts(user_agent, api=API, **params):
     """Една пакетна заявка → {каноничното заглавие: текст}; плюс картата на пренасочванията."""
-    data = api_get(user_agent, action="query", prop="extracts", exintro=1, explaintext=1,
+    data = api_get(user_agent, api=api, action="query", prop="extracts", exintro=1, explaintext=1,
                    exlimit=BATCH, redirects=1, **params)
     query = data.get("query", {})
     redirects = {r["from"]: r["to"] for r in query.get("redirects", []) + query.get("normalized", [])}
@@ -86,14 +86,14 @@ def main():
             if len(text.split()) < args.min_words:
                 print(f"  - {topic}: твърде кратко въведение ({len(text.split())} думи)")
                 continue
-            rows.append({"text": text, "label": 0, "topic": topic,
-                         "source": f"bg.wikipedia: {title}", "model": "human"})
+            rows.append({"text": text, "label": 0, "topic": topic, "source": f"bg.wikipedia: {title}",
+                         "model": "human", "genre": "encyclopedia"})
             print(f"  + {topic} ({len(text.split())} думи)")
         time.sleep(DELAY)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["text", "label", "topic", "source", "model"])
+        writer = csv.DictWriter(f, fieldnames=["text", "label", "topic", "source", "model", "genre"])
         writer.writeheader()
         writer.writerows(rows)
     print(f"Записани {len(rows)} човешки текста в {args.out}")

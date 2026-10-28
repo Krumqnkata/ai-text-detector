@@ -1,10 +1,11 @@
-"""Генерира ИИ текстове на същите теми като човешките (data/human.csv).
+"""Генерира ИИ текстове на същите теми и в същия жанр като човешките (data/human*.csv).
 
 Нужен е ANTHROPIC_API_KEY. Всеки модел пише по един текст на тема с дължина,
 близка до тази на човешкия текст, за да не стане дължината издайнически признак.
 Скриптът е възобновяем: пропуска двойките (тема, модел), които вече ги има.
 
     python scripts/generate_ai.py
+    python scripts/generate_ai.py --human data/human_news.csv --out data/ai_generated_news.csv
     python scripts/generate_ai.py --models claude-haiku-5-5 --limit 20
 
 Резервни модели (server-side fallbacks) нарочно НЕ са включени: ако един модел
@@ -21,18 +22,24 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
-FIELDS = ["text", "label", "topic", "source", "model"]
+FIELDS = ["text", "label", "topic", "source", "model", "genre"]
 
-PROMPTS = [
-    "Напиши енциклопедичен текст на български език на тема „{topic}“, около {words} думи. "
-    "Без заглавие, без списъци и без форматиране — само обикновени абзаци.",
-    "Обясни накратко на български какво трябва да знае човек за „{topic}“, около {words} думи, "
-    "в стила на статия от енциклопедия. Само текст в абзаци, без заглавие и списъци.",
-]
+PROMPTS = {
+    "encyclopedia": [
+        "Напиши енциклопедичен текст на български език на тема „{topic}“, около {words} думи. "
+        "Без заглавие, без списъци и без форматиране — само обикновени абзаци.",
+        "Обясни накратко на български какво трябва да знае човек за „{topic}“, около {words} думи, "
+        "в стила на статия от енциклопедия. Само текст в абзаци, без заглавие и списъци.",
+    ],
+    "news": [
+        "Напиши новинарска статия на български със заглавие „{topic}“, около {words} думи. "
+        "Без заглавие и без списъци — само текста на статията.",
+    ],
+}
 
 
-def generate(client, model, topic, words):
-    prompt = random.choice(PROMPTS).format(topic=topic, words=words)
+def generate(client, model, topic, words, genre):
+    prompt = random.choice(PROMPTS[genre]).format(topic=topic, words=words)
     response = client.messages.create(
         model=model,
         max_tokens=4000,
@@ -56,7 +63,8 @@ def main():
 
     random.seed(args.seed)
     human = pd.read_csv(args.human)
-    topics = human[["topic", "text"]].drop_duplicates("topic")
+    human["genre"] = human["genre"].fillna("encyclopedia") if "genre" in human else "encyclopedia"
+    topics = human[["topic", "text", "genre"]].drop_duplicates("topic")
     if args.limit:
         topics = topics.sample(min(args.limit, len(topics)), random_state=args.seed)
 
@@ -72,13 +80,13 @@ def main():
         if new_file:
             writer.writeheader()
         for model in args.models:
-            for topic, human_text in topics.itertuples(index=False):
+            for topic, human_text, genre in topics.itertuples(index=False):
                 if (topic, model) in done:
                     continue
                 words = min(args.max_words, max(80, len(human_text.split())))
                 words = int(round(words * random.uniform(0.8, 1.1), -1))
                 try:
-                    text = generate(client, model, topic, words)
+                    text = generate(client, model, topic, words, genre)
                 except anthropic.NotFoundError:
                     sys.exit(f"Моделът {model} не е намерен.")
                 except anthropic.APIStatusError as exc:
@@ -88,7 +96,7 @@ def main():
                     print(f"  - {model} / {topic}: отказ или празен отговор")
                     continue
                 writer.writerow({"text": text, "label": 1, "topic": topic,
-                                 "source": "anthropic-api", "model": model})
+                                 "source": "anthropic-api", "model": model, "genre": genre})
                 f.flush()
                 print(f"  + {model} / {topic} ({len(text.split())} думи)")
 

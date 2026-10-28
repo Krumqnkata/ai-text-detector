@@ -47,11 +47,15 @@ function updateCount() {
 $("text").addEventListener("input", updateCount);
 $("clear").addEventListener("click", () => { $("text").value = ""; updateCount(); $("text").focus(); });
 
+const GENRES = { encyclopedia: "енциклопедия", news: "новина" };
 fetch("/examples").then((r) => r.json()).then((items) => {
-  $("examples").innerHTML = items.map((e, i) =>
-    `<button type="button" class="chip-btn" data-i="${i}"
-      aria-label="Пример: ${e.label === "ai" ? "ИИ" : "човек"} (${escapeHtml(e.topic)})">
-      <span class="dot" style="background:var(--${e.label === "ai" ? "ai" : "human"})"></span>Пример: ${e.label === "ai" ? "ИИ" : "човек"}</button>`).join("");
+  $("examples").innerHTML = items.map((e, i) => {
+    const who = e.label === "ai" ? "ИИ" : "човек";
+    const genre = GENRES[e.genre] || e.genre;
+    return `<button type="button" class="chip-btn" data-i="${i}"
+      aria-label="Пример: ${who}, ${genre} (${escapeHtml(e.topic)})">
+      <span class="dot" style="background:var(--${e.label === "ai" ? "ai" : "human"})"></span>${who} · ${genre}</button>`;
+  }).join("");
   $("examples").onclick = (ev) => {
     const btn = ev.target.closest("button");
     if (!btn) return;
