@@ -22,7 +22,7 @@ from detector.model import MODEL_PATH, Detector  # noqa: E402
 STATIC = Path(__file__).parent / "static"
 MAX_CHARS = 20_000
 
-app = FastAPI(title="Детектор на ИИ текст", version="0.1")
+app = FastAPI(title="Детектор на ИИ текст", version="0.3.1")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 detector = Detector.load() if MODEL_PATH.exists() else None
 if detector is not None and detector.neural:
